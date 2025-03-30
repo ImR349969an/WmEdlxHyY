@@ -1,0 +1,207 @@
+os:   linux
+dist: trusty
+
+env:
+  global:
+    - PROG=rexray
+
+jobs:
+  include:
+
+    # the first stage builds all of the binaries possible, searching
+    # for any build errors that could possibly occur. this prevents
+    # the subsequent stages from wasting time enqueued for available vms
+    - &build-stage
+      stage:          build
+      language:       go
+      go:             1.9.1
+      go_import_path: github.com/rexray/rexray
+      env:            PROG=rexray
+      before_script:
+        - git fetch --unshallow --tags
+      script:
+        - export GOARCH=${XGOARCH:-amd64}
+        - make
+        - md5sum $PROG
+        - ls -al $PROG
+        - if [ "$GOARCH" = "amd64" ]; then ./$PROG version; else file $PROG; fi
+
+    - <<: *build-stage
+      env: PROG=rexray XGOARCH=arm
+    - <<: *build-stage
+      env: PROG=rexray XGOARCH=arm64
+
+    - <<: *build-stage
+      env: PROG=rexray-agent       TYPE=agent
+    - <<: *build-stage
+      env: PROG=rexray-controller  TYPE=controller
+
+    - <<: *build-stage
+      env: DRIVER=azureud
+    - <<: *build-stage
+      env: DRIVER=cinder
+    - <<: *build-stage
+      env: DRIVER=csi-nfs
+    - <<: *build-stage
+      env: DRIVER=dobs
+    - <<: *build-stage
+      env: DRIVER=ebs
+    - <<: *build-stage
+      env: DRIVER=efs
+    - <<: *build-stage
+      env: DRIVER=gcepd
+    - <<: *build-stage
+      env: DRIVER=isilon
+    - <<: *build-stage
+      env: DRIVER=rbd
+    - <<: *build-stage
+      env: DRIVER=s3fs
+    - <<: *build-stage
+      env: DRIVER=scaleio
+
+    # the second stage builds all of the tests, executes the framework
+    # tests using the vfs driver, and uploads the resulting coverage
+    # results to codecov.io
+    - stage:          test
+      language:       go
+      go:             1.9.1
+      go_import_path: github.com/rexray/rexray
+      before_script:
+        - git fetch --unshallow --tags
+        - go run core/semver/semver.go -f json
+      script:
+        - make test
+        - make cover
+
+    # the third stage is responsible for producing the rexray stand-alone,
+    # agent, client, and controller binaries as well as packaging the
+    # binaries and uploading them to bintray
+    - &deploy-stage
+      stage:          deploy
+      language:       c
+      env:            PROG=rexray
+      services:       docker
+      sudo:           required
+      before_install:
+        - gem install gist
+        - sudo apt-get update
+        - sudo apt-get -y -o Dpkg::Options::="--force-confnew" install docker-ce
+        - docker --version
+      install:
+        - sudo apt-get -y install rpm debhelper dpkg dpkg-dev fakeroot alien
+      before_script:
+        - git fetch --unshallow --tags
+      script:
+        - export GOARCH=${XGOARCH:-amd64}
+        - make
+        - md5sum $PROG
+        - ls -al $PROG
+        - if [ "$GOARCH" = "amd64" ]; then ./$PROG version; else file $PROG; fi
+        - make tgz
+        - if [ "$GOARCH" = "amd64" ]; then make rpm; fi
+        - if [ "$GOARCH" = "amd64" ]; then make deb; fi
+        - make bintray
+      after_success:
+        - make create-gist
+      after_failure:
+        - make create-gist
+      deploy:
+        - &deploy-to-bintray
+          provider:       bintray
+          file:           bintray-unstable.json
+          user:           $BINTRAY_USER
+          key:            $BINTRAY_KEY
+          skip_cleanup:   true
+          on:
+            all_branches: true
+            condition:    $DEPLOY_BINTRAY != 0 && $TRAVIS_TAG =~ ^$ && ($TRAVIS_REPO_SLUG = 'rexray/rexray' || $IGNORE_REPO_SLUG_CONDITION = true) && ($TRAVIS_BRANCH = master || $IGNORE_BRANCH_CONDITION = true)
+        - <<: *deploy-to-bintray
+          file:           bintray-staged.json
+          on:
+            all_branches: true
+            condition:    $DEPLOY_BINTRAY != 0 && $TRAVIS_TAG =~ -rc[[:digit:]]+$ && ($TRAVIS_REPO_SLUG = 'rexray/rexray' || $IGNORE_REPO_SLUG_CONDITION = true)
+        - <<: *deploy-to-bintray
+          file:           bintray-stable.json
+          on:
+            all_branches: true
+            condition:    $DEPLOY_BINTRAY != 0 && $TRAVIS_TAG =~ ^v?[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]$ && ($TRAVIS_REPO_SLUG = 'rexray/rexray' || $IGNORE_REPO_SLUG_CONDITION = true)
+
+    - <<: *deploy-stage
+      env: PROG=rexray XGOARCH=arm
+    - <<: *deploy-stage
+      env: PROG=rexray XGOARCH=arm64
+
+    - <<: *deploy-stage
+      env: PROG=rexray-agent      TYPE=agent
+    - <<: *deploy-stage
+      env: PROG=rexray-client     TYPE=client
+    - <<: *deploy-stage
+      env: PROG=rexray-controller TYPE=controller
+
+    # the final stage is responsible for building the docker managed
+    # storage plug-ins using driver-specific versions of the stand-alone
+    # rex-ray binaries
+    - &docker-stage
+      stage:          docker
+      language:       c
+      env:            DRIVER=azureud
+      services:       docker
+      sudo:           required
+      before_install:
+        - gem install gist
+        - sudo apt-get update
+        - sudo apt-get -y -o Dpkg::Options::="--force-confnew" install docker-ce
+        - docker --version
+      before_script:
+        - git fetch --unshallow --tags
+      script:
+        - make
+        - md5sum $PROG
+        - ls -al $PROG
+        - ./$PROG version
+        - make build-docker-plugin
+      after_success:
+        - make create-gist
+      after_failure:
+        - make create-gist
+      deploy:
+        - &deploy-docker
+          provider: script
+          script: ./make.sh push-docker-plugin unstable
+          skip_cleanup: true
+          on:
+            all_branches: true
+            condition: $DEPLOY_DOCKER != 0 && $TRAVIS_TAG =~ ^$ && ($TRAVIS_REPO_SLUG = 'rexray/rexray' || $IGNORE_REPO_SLUG_CONDITION = true) && ($TRAVIS_BRANCH = master || $IGNORE_BRANCH_CONDITION = true)
+
+        - <<: *deploy-docker
+          script: ./make.sh push-docker-plugin staged
+          on:
+            all_branches: true
+            condition: $DEPLOY_DOCKER != 0 && $TRAVIS_TAG =~ -rc[[:digit:]]+$ && ($TRAVIS_REPO_SLUG = 'rexray/rexray' || $IGNORE_REPO_SLUG_CONDITION = true)
+
+        - <<: *deploy-docker
+          script: ./make.sh push-docker-plugin stable
+          on:
+            all_branches: true
+            condition: $DEPLOY_DOCKER != 0 && $TRAVIS_TAG =~ ^v?[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]$ && ($TRAVIS_REPO_SLUG = 'rexray/rexray' || $IGNORE_REPO_SLUG_CONDITION = true)
+
+    - <<: *docker-stage
+      env: DRIVER=cinder
+    - <<: *docker-stage
+      env: DRIVER=csi-nfs
+    - <<: *docker-stage
+      env: DRIVER=dobs
+    - <<: *docker-stage
+      env: DRIVER=ebs
+    - <<: *docker-stage
+      env: DRIVER=efs
+    - <<: *docker-stage
+      env: DRIVER=gcepd
+    - <<: *docker-stage
+      env: DRIVER=isilon
+    - <<: *docker-stage
+      env: DRIVER=rbd
+    - <<: *docker-stage
+      env: DRIVER=s3fs
+    - <<: *docker-stage
+      env: DRIVER=scaleio
