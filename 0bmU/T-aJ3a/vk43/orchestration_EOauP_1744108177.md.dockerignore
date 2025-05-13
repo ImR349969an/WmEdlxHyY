@@ -7,6 +7,5 @@ README.md
 .git
 
 .yalc/
-yalc.lock
 testApi/
 *.local.*
