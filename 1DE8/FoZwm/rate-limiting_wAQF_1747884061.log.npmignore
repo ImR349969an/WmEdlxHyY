@@ -1,0 +1,13 @@
+.idea
+.gitignore
+.github
+.npmignore
+*.json
+.editorconfig
+test
+coverage
+img
+.github
+*.yml
+*.yaml
+.nyc_output
